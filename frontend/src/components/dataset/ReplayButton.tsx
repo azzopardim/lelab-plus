@@ -5,6 +5,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots } from "@/hooks/useRobots";
 import { apiRequest } from "@/lib/apiClient";
+import { followerArmsPayload } from "@/lib/robotArms";
 
 interface ReplayResponse {
   success: boolean;
@@ -108,8 +109,7 @@ const ReplayButton: React.FC<ReplayButtonProps> = ({ repoId, episodeIndex, onSta
       const res = await apiRequest<ReplayResponse>(baseUrl, fetchWithHeaders, "/start-replay", {
         method: "POST",
         body: {
-          follower_port: robot.follower_port,
-          follower_config: robot.follower_config,
+          ...followerArmsPayload(robot),
           dataset_repo_id: repoId,
           episode_index: episodeIndex,
         },

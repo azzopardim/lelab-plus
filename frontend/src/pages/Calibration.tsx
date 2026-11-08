@@ -43,6 +43,15 @@ import { useApi } from "@/contexts/ApiContext";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration from "@/components/recording/CameraConfiguration";
 import { CameraConfig, loadCameraConfigs, cameraConfigurationError } from "@/lib/cameraConfig";
+import type { RobotRecord } from "@/hooks/useRobots";
+import {
+  ArmSide,
+  CalibrationSlot,
+  DeviceType,
+  armField,
+  calibrationSlots,
+  readArmField,
+} from "@/lib/robotArms";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
@@ -66,17 +75,14 @@ interface CalibrationRequest {
   port: string;
   config_file: string;
   robot_name: string | null;
+  arm: ArmSide;
 }
 
-interface RobotRecord {
-  name: string;
-  leader_port: string;
-  follower_port: string;
-  leader_config: string;
-  follower_config: string;
-  cameras: CameraConfig[];
-  is_clean: boolean;
-}
+/** First arm still missing a calibration, else the first arm. */
+const firstIncompleteSlot = (r: RobotRecord): CalibrationSlot => {
+  const slots = calibrationSlots(r);
+  return slots.find((s) => !readArmField(r, s.arm, s.deviceType, "config")) ?? slots[0];
+};
 
 const Calibration = () => {
   const navigate = useNavigate();
@@ -89,7 +95,9 @@ const Calibration = () => {
   const consoleRef = useRef<HTMLDivElement>(null);
   const demoVideoRef = useRef<HTMLDivElement>(null);
 
-  const [deviceType, setDeviceType] = useState<string>("teleop");
+  const [deviceType, setDeviceType] = useState<DeviceType>("teleop");
+  // Which arm of a bimanual robot is being set up; always "left" for one arm.
+  const [arm, setArm] = useState<ArmSide>("left");
   const [port, setPort] = useState<string>("");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
@@ -123,18 +131,11 @@ const Calibration = () => {
     (async () => {
       const r = await fetchRobot();
       if (!r || cancelled) return;
-      // Default to the first incomplete side in the checklist (leader, then follower).
-      const defaultDevice = !r.leader_config
-        ? "teleop"
-        : !r.follower_config
-        ? "robot"
-        : "teleop";
-      setDeviceType(defaultDevice);
-      setPort(
-        defaultDevice === "teleop"
-          ? r.leader_port || ""
-          : r.follower_port || ""
-      );
+      // Default to the first incomplete arm in the checklist.
+      const slot = firstIncompleteSlot(r);
+      setArm(slot.arm);
+      setDeviceType(slot.deviceType);
+      setPort(readArmField(r, slot.arm, slot.deviceType, "port"));
       const loaded = loadCameraConfigs(r.cameras ?? []);
       setCameras(loaded);
       const cameraError = cameraConfigurationError(loaded);
@@ -257,11 +258,14 @@ const Calibration = () => {
       return;
     }
 
+    // Each arm of a bimanual robot needs its own calibration file, so suffix
+    // the side; a single-arm robot keeps the plain robot name.
     const request: CalibrationRequest = {
       device_type: deviceType,
       port: port,
-      config_file: robotName,
+      config_file: robot?.bimanual ? `${robotName}_${arm}` : robotName,
       robot_name: robotName,
+      arm: robot?.bimanual ? arm : "left",
     };
 
     // Optimistically mark as active so the unmount cleanup will fire even if
@@ -280,7 +284,7 @@ const Calibration = () => {
       if (result.success) {
         toast({
           title: "Calibration Started",
-          description: `Calibration started for ${deviceType}`,
+          description: `Calibration started for ${slotLabel}`,
         });
         setIsPolling(true);
       } else {
@@ -419,12 +423,55 @@ const Calibration = () => {
   }, [deviceType, robotName, baseUrl, fetchWithHeaders]);
 
   const handleDeviceTypeChange = (next: string) => {
-    setDeviceType(next);
+    const nextDevice = next as DeviceType;
+    setDeviceType(nextDevice);
     if (!robot) return;
-    setPort(
-      next === "teleop" ? robot.leader_port || "" : robot.follower_port || ""
-    );
+    setPort(readArmField(robot, arm, nextDevice, "port"));
   };
+
+  const handleArmChange = (next: string) => {
+    const nextArm = next as ArmSide;
+    setArm(nextArm);
+    if (!robot) return;
+    setPort(readArmField(robot, nextArm, deviceType, "port"));
+  };
+
+  // Switch the robot between one leader/follower pair and two (left + right).
+  // The left pair keeps the existing fields, so turning this on keeps the
+  // current calibration as the left arm.
+  const handleBimanualChange = async (next: boolean) => {
+    if (!robotName) return;
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bimanual: next }),
+        }
+      );
+      const data = res.ok ? await res.json() : null;
+      if (!data?.robot) throw new Error(`HTTP ${res.status}, no robot record`);
+      const r = data.robot as RobotRecord;
+      setRobot(r);
+      const slot = firstIncompleteSlot(r);
+      setArm(slot.arm);
+      setDeviceType(slot.deviceType);
+      setPort(readArmField(r, slot.arm, slot.deviceType, "port"));
+    } catch (e) {
+      console.error("Failed to change arm setup:", e);
+      toast({
+        title: "Could not change arm setup",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const currentArm: ArmSide = robot?.bimanual ? arm : "left";
+  const slotLabel =
+    calibrationSlots(robot).find((s) => s.arm === currentArm && s.deviceType === deviceType)?.label ??
+    deviceType;
 
   // Refresh the robot record when a calibration completes so the checklist
   // flips to ✓ for the side that was just saved, and advance Device Type to
@@ -434,17 +481,10 @@ const Calibration = () => {
     (async () => {
       const r = await fetchRobot();
       if (!r) return;
-      const nextDevice = !r.leader_config
-        ? "teleop"
-        : !r.follower_config
-        ? "robot"
-        : "teleop";
-      setDeviceType(nextDevice);
-      setPort(
-        nextDevice === "teleop"
-          ? r.leader_port || ""
-          : r.follower_port || ""
-      );
+      const slot = firstIncompleteSlot(r);
+      setArm(slot.arm);
+      setDeviceType(slot.deviceType);
+      setPort(readArmField(r, slot.arm, slot.deviceType, "port"));
     })();
   }, [calibrationStatus.status, fetchRobot]);
 
@@ -460,7 +500,7 @@ const Calibration = () => {
   const persistPort = useCallback(
     async (nextPort: string) => {
       if (!robotName || !nextPort) return;
-      const field = deviceType === "robot" ? "follower_port" : "leader_port";
+      const field = armField(currentArm, deviceType, "port");
       // Skip redundant writes when the value already matches the record.
       if (robot && robot[field] === nextPort) return;
       try {
@@ -486,7 +526,7 @@ const Calibration = () => {
         });
       }
     },
-    [robotName, deviceType, robot, baseUrl, fetchWithHeaders, toast]
+    [robotName, deviceType, currentArm, robot, baseUrl, fetchWithHeaders, toast]
   );
 
   // Calibration files already on disk. Linking one to this robot skips
@@ -510,11 +550,11 @@ const Calibration = () => {
     // Re-list when a calibration ends, so a newly written file shows up.
   }, [deviceType, baseUrl, fetchWithHeaders, calibrationStatus.calibration_active]);
 
-  const configField = deviceType === "robot" ? "follower_config" : "leader_config";
+  const configField = armField(currentArm, deviceType, "config");
 
   const linkExistingConfig = async (filename: string) => {
     if (!robotName) return;
-    const portField = deviceType === "robot" ? "follower_port" : "leader_port";
+    const portField = armField(currentArm, deviceType, "port");
     try {
       const res = await fetchWithHeaders(
         `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
@@ -532,7 +572,7 @@ const Calibration = () => {
       setRobot(data.robot);
       toast({
         title: "Calibration linked",
-        description: `${deviceType === "robot" ? "Follower" : "Leader"} now uses ${filename}.`,
+        description: `${slotLabel} now uses ${filename}.`,
       });
     } catch (e) {
       toast({
@@ -637,6 +677,62 @@ const Calibration = () => {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
+              {robot && (
+                <div className="flex items-center justify-between gap-4 rounded-md border border-slate-700 bg-slate-900/40 p-3">
+                  <div className="space-y-0.5">
+                    <Label
+                      htmlFor="bimanual-toggle"
+                      className="text-sm font-medium text-slate-300 cursor-pointer"
+                    >
+                      Two arms (bimanual)
+                    </Label>
+                    <p className="text-xs text-slate-400">
+                      Left leader drives the left follower, right leader the
+                      right follower, in one environment.
+                    </p>
+                  </div>
+                  <Switch
+                    id="bimanual-toggle"
+                    checked={!!robot.bimanual}
+                    onCheckedChange={handleBimanualChange}
+                    disabled={calibrationStatus.calibration_active}
+                    className="data-[state=checked]:bg-green-500"
+                    aria-label="Use two leader/follower arm pairs"
+                  />
+                </div>
+              )}
+
+              {robot?.bimanual && (
+                <div className="space-y-2">
+                  <Label
+                    htmlFor="arm"
+                    className="text-sm font-medium text-slate-300"
+                  >
+                    Arm *
+                  </Label>
+                  <Select
+                    value={arm}
+                    onValueChange={handleArmChange}
+                    disabled={calibrationStatus.calibration_active}
+                  >
+                    <SelectTrigger
+                      id="arm"
+                      className="bg-slate-700 border-slate-600 text-white rounded-md"
+                    >
+                      <SelectValue placeholder="Select arm" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                      <SelectItem value="left" className="hover:bg-slate-700">
+                        Left arm
+                      </SelectItem>
+                      <SelectItem value="right" className="hover:bg-slate-700">
+                        Right arm
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label
                   htmlFor="deviceType"
@@ -723,8 +819,8 @@ const Calibration = () => {
                         </p>
                         <Select
                           value={
-                            robot && existingConfigs.includes(robot[configField])
-                              ? robot[configField]
+                            robot && existingConfigs.includes(robot[configField] ?? "")
+                              ? robot[configField] ?? ""
                               : ""
                           }
                           onValueChange={linkExistingConfig}
@@ -754,42 +850,25 @@ const Calibration = () => {
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.leader_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.leader_config ? "text-slate-200" : "text-slate-400"
-                      }
-                    >
-                      Leader (Teleoperator)
-                      {robot.leader_config && (
-                        <span className="text-slate-500"> · {robot.leader_config}</span>
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.follower_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.follower_config
-                          ? "text-slate-200"
-                          : "text-slate-400"
-                      }
-                    >
-                      Follower (Robot)
-                      {robot.follower_config && (
-                        <span className="text-slate-500"> · {robot.follower_config}</span>
-                      )}
-                    </span>
-                  </div>
+                  {calibrationSlots(robot).map((slot) => {
+                    const config = readArmField(robot, slot.arm, slot.deviceType, "config");
+                    return (
+                      <div
+                        key={`${slot.arm}-${slot.deviceType}`}
+                        className="flex items-center gap-2 text-sm"
+                      >
+                        {config ? (
+                          <CheckCircle className="w-4 h-4 text-green-400" />
+                        ) : (
+                          <Circle className="w-4 h-4 text-slate-500" />
+                        )}
+                        <span className={config ? "text-slate-200" : "text-slate-400"}>
+                          {slot.label}
+                          {config && <span className="text-slate-500"> · {config}</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>

@@ -37,6 +37,7 @@ Run the Python tests with `pytest` (config in [pyproject.toml](pyproject.toml); 
 
 - [record.py](lelab/record.py): dataset recording around LeRobot's `record_loop`; frontend buttons set the same `events` dict LeRobot's keyboard listener would. The worker is a daemon thread, so the server's shutdown hook calls `stop_recording_and_wait()` to let an active session finalize on Ctrl+C.
 - [teleoperate.py](lelab/teleoperate.py): leader→follower teleoperation loop over LeRobot's SO-101 leader and follower.
+- [jog.py](lelab/jog.py): "Move in 3D" — drives the follower(s) from joints dragged in the 3D view, no leader. Hold-to-move (the browser re-sends targets every 100 ms; older than 500 ms are dropped), each command capped at 2° from the present position via LeRobot's `max_relative_target`, targets clamped to the URDF limits. The teleop 3D view is display-only.
 - [replay.py](lelab/replay.py): plays a recorded episode's actions on the follower arm, an in-process take on `lerobot-replay` so the dataset browser can stop it.
 - [calibrate.py](lelab/calibrate.py) — step-by-step web calibration with a `CalibrationManager` singleton and `_step_complete` threading.Event.
 - [train.py](lelab/train.py) — wraps the LeRobot training CLI as a subprocess (psutil for lifecycle, queue for log streaming).
@@ -46,7 +47,7 @@ Run the Python tests with `pytest` (config in [pyproject.toml](pyproject.toml); 
 
 ### State model
 
-Each feature module owns module-level globals (e.g. `recording_active`, `teleoperation_active`, `current_robot`) protected by threads/locks where needed. There's no shared session object. Recording, teleoperation, inference and replay all drive the follower, so each start handler checks the others' flags and refuses to run while one is active. Calibration is not part of that check.
+Each feature module owns module-level globals (e.g. `recording_active`, `teleoperation_active`, `current_robot`) protected by threads/locks where needed. There's no shared session object. Recording, teleoperation, inference, replay and 3D jog all drive the follower, so each start handler checks the others' flags and refuses to run while one is active. Calibration is not part of that check.
 
 ### WebSocket broadcast
 
@@ -69,7 +70,14 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](lelab/ut
 
 ## Hardware target
 
-Hardcoded for **SO-101 leader/follower arms** (`so101_leader`, `so101_follower`). Adding another robot type requires touching every feature module's config construction (search for `SO101LeaderConfig` / `SO101FollowerConfig`).
+Hardcoded for **SO-101 leader/follower arms** (`so101_leader`, `so101_follower`), as one pair or as a **bimanual** robot: two pairs (left leader → left follower, right leader → right follower) in one environment, driven through LeRobot's `bi_so_leader` / `bi_so_follower`. Config construction lives in [utils/arms.py](lelab/utils/arms.py) (`build_follower_config` / `build_leader_config`), and feature modules walk per-arm buses with `connect_buses` / `write_calibration` because a bimanual device has no top-level `.bus`. Adding another robot type starts there.
+
+Bimanual conventions:
+
+- A robot record with `bimanual: true` uses the unprefixed fields (`leader_port`, `follower_config`...) for the **left** pair and `right_*` fields for the right pair. Requests carry the same fields (see `BimanualArmsFields` / `BimanualFollowerFields`), so single-arm clients are unchanged.
+- Calibration is still one SO-101 arm at a time (`/start-calibration` takes `arm: "left" | "right"` for the record write-back); the frontend names the files `{robot}_left.json` / `{robot}_right.json`.
+- Before driving the arms, `setup_bimanual_*_calibration_files` copies the chosen per-arm files to `calibration/{teleoperators/bi_so_leader,robots/bi_so_follower}/lelab_{left,right}.json`, the names LeRobot's BiSO devices load. Always overwritten; never edit them by hand.
+- Joint/action keys get `left_` / `right_` prefixes (LeRobot's layout); cameras stay top-level and unprefixed. `/ws/joint-data` adds `arms: {left, right}` while `joints` mirrors the left arm. Replay refuses an episode whose action keys don't match the robot.
 
 ## Phone camera / HTTPS
 

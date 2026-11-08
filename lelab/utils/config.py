@@ -31,6 +31,15 @@ CALIBRATION_BASE_PATH_ROBOTS = os.path.expanduser("~/.cache/huggingface/lerobot/
 LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "so_leader")
 FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 
+# Bimanual (two-arm) setups go through LeRobot's BiSOLeader / BiSOFollower,
+# which load each arm's calibration from `{calibration_dir}/{id}_left.json` and
+# `{id}_right.json`. The user picks any per-arm file from the single-arm
+# directories above; setup_bimanual_calibration_files() stages copies under
+# these names so LeRobot finds them (both in-process and via the rollout CLI).
+BIMANUAL_LEADER_CALIBRATION_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "bi_so_leader")
+BIMANUAL_FOLLOWER_CALIBRATION_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "bi_so_follower")
+BIMANUAL_DEVICE_ID = "lelab"
+
 # Define port storage path
 PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
@@ -164,6 +173,48 @@ def setup_follower_calibration_file(follower_config: str):
         logger.info(f"Follower calibration already exists at {follower_target_path}")
 
     return follower_config_name
+
+
+def _stage_calibration_file(source_dir: str, config: str, target_dir: str, target_name: str, label: str):
+    source = os.path.join(source_dir, config if config.endswith(".json") else f"{config}.json")
+    if not os.path.exists(source):
+        raise FileNotFoundError(f"{label} calibration file not found: {source}")
+    os.makedirs(target_dir, exist_ok=True)
+    target = os.path.join(target_dir, f"{target_name}.json")
+    # Always overwrite: the staged name is fixed, so a stale copy from another
+    # robot (or an older calibration of the same arm) must never be reused.
+    shutil.copy2(source, target)
+    logger.info(f"Staged {label} calibration {source} -> {target}")
+
+
+def setup_bimanual_follower_calibration_files(left_config: str, right_config: str) -> str:
+    """Stage the left/right follower calibrations for LeRobot's BiSOFollower.
+
+    Returns the bimanual device id; pass it as the BiSOFollowerConfig ``id``
+    along with ``calibration_dir=BIMANUAL_FOLLOWER_CALIBRATION_PATH``.
+    """
+    for side, config in (("left", left_config), ("right", right_config)):
+        _stage_calibration_file(
+            FOLLOWER_CONFIG_PATH,
+            config,
+            BIMANUAL_FOLLOWER_CALIBRATION_PATH,
+            f"{BIMANUAL_DEVICE_ID}_{side}",
+            f"{side.capitalize()} follower",
+        )
+    return BIMANUAL_DEVICE_ID
+
+
+def setup_bimanual_leader_calibration_files(left_config: str, right_config: str) -> str:
+    """Stage the left/right leader calibrations for LeRobot's BiSOLeader."""
+    for side, config in (("left", left_config), ("right", right_config)):
+        _stage_calibration_file(
+            LEADER_CONFIG_PATH,
+            config,
+            BIMANUAL_LEADER_CALIBRATION_PATH,
+            f"{BIMANUAL_DEVICE_ID}_{side}",
+            f"{side.capitalize()} leader",
+        )
+    return BIMANUAL_DEVICE_ID
 
 
 def find_available_ports():
@@ -330,8 +381,13 @@ def get_default_robot_config(robot_type: str, available_configs: list):
 
 # Characters disallowed in a robot name (filesystem safety)
 _INVALID_NAME_CHARS = ("/", "\\", "..")
-_ROBOT_STRING_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+# For a bimanual robot the unprefixed fields describe the LEFT arm pair and the
+# `right_*` fields the right arm pair.
+_ROBOT_SINGLE_ARM_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+_ROBOT_RIGHT_ARM_FIELDS = tuple(f"right_{f}" for f in _ROBOT_SINGLE_ARM_FIELDS)
+_ROBOT_STRING_FIELDS = _ROBOT_SINGLE_ARM_FIELDS + _ROBOT_RIGHT_ARM_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
+_ROBOT_BOOL_FIELDS = ("bimanual",)
 
 
 def _robot_record_path(name: str) -> str:
@@ -353,6 +409,8 @@ def _empty_record(name: str) -> dict:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
         record[field] = []
+    for field in _ROBOT_BOOL_FIELDS:
+        record[field] = False
     return record
 
 
@@ -416,6 +474,9 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     for field in _ROBOT_LIST_FIELDS:
         if field in data and isinstance(data[field], list):
             record[field] = data[field]
+    for field in _ROBOT_BOOL_FIELDS:
+        if field in data and isinstance(data[field], bool):
+            record[field] = data[field]
     record["name"] = name
 
     path = _robot_record_path(name)
@@ -439,15 +500,20 @@ def delete_robot_record(name: str) -> bool:
 def is_robot_record_clean(record: dict) -> bool:
     """
     A record is 'clean' when all four operational fields are populated AND both
-    referenced calibration files exist on disk. Cameras are optional and don't
-    affect cleanliness.
+    referenced calibration files exist on disk. A bimanual record needs the
+    four `right_*` fields too, and all four calibration files. Cameras are
+    optional and don't affect cleanliness.
     """
     if not record:
         return False
-    for field in _ROBOT_STRING_FIELDS:
-        value = record.get(field, "")
-        if not isinstance(value, str) or not value.strip():
+    prefixes = ("", "right_") if record.get("bimanual") else ("",)
+    for prefix in prefixes:
+        for field in _ROBOT_SINGLE_ARM_FIELDS:
+            value = record.get(f"{prefix}{field}", "")
+            if not isinstance(value, str) or not value.strip():
+                return False
+        leader_path = os.path.join(LEADER_CONFIG_PATH, record[f"{prefix}leader_config"])
+        follower_path = os.path.join(FOLLOWER_CONFIG_PATH, record[f"{prefix}follower_config"])
+        if not (os.path.exists(leader_path) and os.path.exists(follower_path)):
             return False
-    leader_path = os.path.join(LEADER_CONFIG_PATH, record["leader_config"])
-    follower_path = os.path.join(FOLLOWER_CONFIG_PATH, record["follower_config"])
-    return os.path.exists(leader_path) and os.path.exists(follower_path)
+    return True

@@ -19,6 +19,13 @@ import {
   setupModelLoading,
   URDFViewerElement,
 } from "@/lib/urdfViewerHelpers";
+import {
+  BIMANUAL_SPACING_M,
+  JointedRobot,
+  addArmLabel,
+  placeBimanualArms,
+} from "@/lib/bimanualScene";
+import { JogArm, JogViewer, installJogDragging, setPickable } from "@/lib/jogControls";
 
 // Register the URDFManipulator as a custom element if it hasn't been already
 if (typeof window !== "undefined" && !customElements.get("urdf-viewer")) {
@@ -32,7 +39,24 @@ interface UrdfViewerElement extends HTMLElement {
   setJointValue?: (jointName: string, value: number) => void;
 }
 
-const UrdfViewer: React.FC = () => {
+interface UrdfViewerProps {
+  /** Show both arms of a bimanual robot side by side in one scene. */
+  bimanual?: boolean;
+  /**
+   * "view": display only (teleoperation; the leaders own the followers).
+   * "jog": dragging a joint reports the arm's target pose while held.
+   */
+  mode?: "view" | "jog";
+  onJogHold?: (arm: JogArm, joints: Record<string, number>) => void;
+  onJogRelease?: (arm: JogArm) => void;
+}
+
+const UrdfViewer: React.FC<UrdfViewerProps> = ({
+  bimanual = false,
+  mode = "view",
+  onJogHold,
+  onJogRelease,
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
   const { registerUrdfProcessor, alternativeUrdfModels, isDefaultModel } =
@@ -41,11 +65,22 @@ const UrdfViewer: React.FC = () => {
   const cleanupAnimationRef = useRef<(() => void) | null>(null);
   const viewerRef = useRef<URDFViewerElement | null>(null);
   const hasInitializedRef = useRef<boolean>(false);
+  // The right arm's copy in bimanual mode (the left arm is viewer.robot).
+  const rightRobotRef = useRef<JointedRobot | null>(null);
+  // The arm being dragged in jog mode: live updates skip it so the drag
+  // isn't pulled back to the follower's position mid-gesture.
+  const heldArmRef = useRef<JogArm | null>(null);
+  // Latest callbacks, read from the drag handlers without re-creating the viewer.
+  const jogHandlersRef = useRef({ onJogHold, onJogRelease });
+  jogHandlersRef.current = { onJogHold, onJogRelease };
 
   // Real-time joint updates via WebSocket
   const { isConnected: isWebSocketConnected } = useRealTimeJoints({
     viewerRef,
     enabled: isDefaultModel, // Only enable WebSocket for default model
+    bimanual,
+    rightRobotRef,
+    heldArmRef,
   });
 
   // Add state for custom URDF path
@@ -178,8 +213,10 @@ const UrdfViewer: React.FC = () => {
       }
 
       try {
-        // Create a bounding box for the robot
-        const boundingBox = new THREE.Box3().setFromObject(viewer.robot);
+        // Create a bounding box for the robot (both arms when bimanual: they
+        // share viewer.robot's parent)
+        const framed = bimanual && viewer.robot.parent ? viewer.robot.parent : viewer.robot;
+        const boundingBox = new THREE.Box3().setFromObject(framed);
 
         // Calculate the center of the bounding box
         const center = new THREE.Vector3();
@@ -233,9 +270,52 @@ const UrdfViewer: React.FC = () => {
       fitRobotToView(viewer);
     };
 
+    let cleanupJog = () => {};
+
     // Setup animation event handler for the default model or when hasAnimation is true
     const onModelProcessed = () => {
       hasInitializedRef.current = true;
+      rightRobotRef.current = null;
+      // Bimanual: copy the loaded arm and stand the two side by side,
+      // BIMANUAL_SPACING_M apart. Only the default SO-101 model streams joints.
+      if (bimanual && isDefaultModel && viewer.robot) {
+        try {
+          const left = viewer.robot as unknown as JointedRobot;
+          const right = placeBimanualArms(left, BIMANUAL_SPACING_M);
+          addArmLabel(left, "Left");
+          addArmLabel(right, "Right");
+          rightRobotRef.current = right;
+          viewer.redraw();
+        } catch (error) {
+          console.error("[RobotViewer] Could not place the second arm:", error);
+        }
+      }
+      // View mode: no arm reacts to the pointer (orbiting still works).
+      // Jog mode: either arm can be dragged; its pose is reported while held.
+      cleanupJog();
+      cleanupJog = () => {};
+      heldArmRef.current = null;
+      if (viewer.robot) {
+        const arms = {
+          left: viewer.robot as unknown as JointedRobot,
+          right: rightRobotRef.current ?? undefined,
+        };
+        const jog = mode === "jog" && isDefaultModel;
+        setPickable(arms.left, jog);
+        if (arms.right) setPickable(arms.right, jog);
+        if (jog) {
+          cleanupJog = installJogDragging(viewer as unknown as JogViewer, arms, {
+            onHold: (arm, joints) => {
+              heldArmRef.current = arm;
+              jogHandlersRef.current.onJogHold?.(arm, joints);
+            },
+            onRelease: (arm) => {
+              heldArmRef.current = null;
+              jogHandlersRef.current.onJogRelease?.(arm);
+            },
+          });
+        }
+      }
       if ("setJointValue" in viewer) {
         // Clear any existing animation
         if (cleanupAnimationRef.current) {
@@ -256,6 +336,9 @@ const UrdfViewer: React.FC = () => {
         cleanupAnimationRef.current = null;
       }
       hasInitializedRef.current = false;
+      rightRobotRef.current = null;
+      cleanupJog();
+      heldArmRef.current = null;
       cleanupJointHighlighting();
       cleanupModelLoading();
       viewer.removeEventListener("urdf-processed", onModelProcessed);
@@ -266,6 +349,8 @@ const UrdfViewer: React.FC = () => {
     urlModifierFunc,
     defaultUrlModifier,
     alternativeUrdfModels,
+    bimanual,
+    mode,
   ]);
 
   return (
@@ -276,6 +361,12 @@ const UrdfViewer: React.FC = () => {
       )}
     >
       <div ref={containerRef} className="w-full h-full" />
+
+      {bimanual && (
+        <div className="absolute top-4 left-4 z-10 rounded-md bg-black/70 px-3 py-2 text-sm font-medium text-gray-200">
+          Two arms · {Math.round(BIMANUAL_SPACING_M * 100)} cm apart
+        </div>
+      )}
 
       {/* Joint highlight indicator */}
       {highlightedJoint && (

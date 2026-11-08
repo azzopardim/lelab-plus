@@ -20,10 +20,17 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+from lerobot.robots import make_robot_from_config
+from lerobot.teleoperators import make_teleoperator_from_config
 
-from .utils.config import setup_calibration_files
+from .utils.arms import (
+    BimanualArmsFields,
+    arms_of,
+    build_follower_config,
+    build_leader_config,
+    connect_buses,
+    write_calibration,
+)
 from .utils.devices import follower_lock, safe_disconnect_device
 
 logger = logging.getLogger(__name__)
@@ -35,16 +42,68 @@ current_robot = None
 current_teleop = None
 
 
-class TeleoperateRequest(BaseModel):
+class TeleoperateRequest(BimanualArmsFields, BaseModel):
+    """Single arm by default; with ``bimanual`` the unprefixed fields are the
+    left pair and the ``right_*`` fields the right pair."""
+
     leader_port: str
     follower_port: str
     leader_config: str
     follower_config: str
 
 
+_MOTOR_TO_URDF = {
+    "shoulder_pan": "Rotation",
+    "shoulder_lift": "Pitch",
+    "elbow_flex": "Elbow",
+    "wrist_flex": "Wrist_Pitch",
+    "wrist_roll": "Wrist_Roll",
+    "gripper": "Jaw",
+}
+
+
+def _urdf_joints(observation: dict, prefix: str = "") -> dict[str, float]:
+    """URDF joint name -> radians for one arm of an observation (same mapping
+    as get_joint_positions_from_robot)."""
+    joint_positions: dict[str, float] = {}
+    for motor_name, urdf_joint_name in _MOTOR_TO_URDF.items():
+        motor_key = f"{prefix}{motor_name}.pos"
+        if motor_key not in observation:
+            logger.warning(f"Motor {motor_key} not found in observation")
+            joint_positions[urdf_joint_name] = 0.0
+            continue
+        joint_positions[urdf_joint_name] = observation[motor_key] * math.pi / 180.0
+    return joint_positions
+
+
+def get_arm_joint_positions(robot) -> dict[str, dict[str, float]]:
+    """{"left": joints, "right": joints} for a bimanual robot, from a single
+    observation read covering both arms."""
+    try:
+        observation = robot.get_observation()
+    except Exception as e:
+        logger.error(f"Error getting joint positions: {e}")
+        observation = {}
+    return {side: _urdf_joints(observation, f"{side}_") for side in ("left", "right")}
+
+
+def joint_update_payload(robot, timestamp: float) -> dict[str, Any]:
+    """The /ws/joint-data message. ``joints`` stays the arm a single-arm viewer
+    renders (the left one when bimanual); bimanual robots add ``arms`` with
+    both sides."""
+    if not arms_of(robot)[0][0]:
+        return {
+            "type": "joint_update",
+            "joints": get_joint_positions_from_robot(robot),
+            "timestamp": timestamp,
+        }
+    arms = get_arm_joint_positions(robot)
+    return {"type": "joint_update", "joints": arms["left"], "arms": arms, "timestamp": timestamp}
+
+
 def get_joint_positions_from_robot(robot) -> dict[str, float]:
     """
-    Extract current joint positions from the robot and convert to URDF joint format.
+    Extract current joint positions from a single-arm robot and convert to URDF joint format.
 
     lerobot drives the SO-101 with ``use_degrees=True`` by default, so each
     ``observation["<motor>.pos"]`` is already the joint angle in degrees relative
@@ -116,7 +175,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     """
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop
 
-    from . import record as _record, replay as _replay, rollout as _rollout
+    from . import jog as _jog, record as _record, replay as _replay, rollout as _rollout
 
     with follower_lock:
         if teleoperation_active:
@@ -127,6 +186,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             return {"success": False, "message": "Inference is currently active. Stop it first."}
         if _replay.replay_active:
             return {"success": False, "message": "Replay is currently active. Stop it first."}
+        if _jog.jog_active:
+            return {"success": False, "message": "3D jog is currently active. Stop it first."}
         teleoperation_active = True
 
     robot = None
@@ -136,56 +197,27 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
 
-        # Setup calibration files
-        leader_config_name, follower_config_name = setup_calibration_files(
-            request.leader_config, request.follower_config
-        )
-
-        # Create robot and teleop configs
-        robot_config = SO101FollowerConfig(
-            port=request.follower_port,
-            id=follower_config_name,
-        )
-
-        teleop_config = SO101LeaderConfig(
-            port=request.leader_port,
-            id=leader_config_name,
-        )
+        # Setup calibration files and build the single or bimanual configs.
+        robot_config = build_follower_config(request)
+        teleop_config = build_leader_config(request)
 
         # Connect synchronously. If either device fails to connect, clean up the
         # other (so its serial port is released) and report the error — do NOT
         # leave the caller thinking teleoperation started.
-        logger.info("Initializing robot and teleop device...")
-        robot = SO101Follower(robot_config)
-        teleop_device = SO101Leader(teleop_config)
+        logger.info("Initializing robot and teleop device (bimanual=%s)...", request.bimanual)
+        robot = make_robot_from_config(robot_config)
+        teleop_device = make_teleoperator_from_config(teleop_config)
 
         # Connect each arm separately so the error names which one failed and
         # tells the user what to do, instead of a generic "failed to start".
-        logger.info("Connecting to follower arm...")
-        try:
-            robot.bus.connect()
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not connect to the follower arm on {request.follower_port}. "
-                "Make sure it's plugged in and powered on, then try again."
-            ) from e
+        logger.info("Connecting to follower arm(s)...")
+        connect_buses(robot, "follower")
+        logger.info("Connecting to leader arm(s)...")
+        connect_buses(teleop_device, "leader")
 
-        logger.info("Connecting to leader arm...")
-        try:
-            teleop_device.bus.connect()
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not connect to the leader arm on {request.leader_port}. "
-                "Make sure it's plugged in and powered on, then try again."
-            ) from e
-
-        # Feetech motors only store calibration registers with the torque off,
-        # which also opens their EEPROM lock.
         logger.info("Writing calibration to motors...")
-        robot.bus.disable_torque()
-        robot.bus.write_calibration(robot.calibration)
-        teleop_device.bus.disable_torque()
-        teleop_device.bus.write_calibration(teleop_device.calibration)
+        write_calibration(robot)
+        write_calibration(teleop_device)
 
         # Connect cameras and configure motors
         logger.info("Connecting cameras and configuring motors...")
@@ -215,14 +247,10 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     current_time = time.time()
                     if current_time - last_broadcast_time >= broadcast_interval:
                         try:
-                            joint_positions = get_joint_positions_from_robot(robot)
-                            joint_data = {
-                                "type": "joint_update",
-                                "joints": joint_positions,
-                                "timestamp": current_time,
-                            }
                             if websocket_manager and websocket_manager.active_connections:
-                                websocket_manager.broadcast_joint_data_sync(joint_data)
+                                websocket_manager.broadcast_joint_data_sync(
+                                    joint_update_payload(robot, current_time)
+                                )
                             last_broadcast_time = current_time
                         except Exception as e:
                             logger.error(f"Error broadcasting joint data: {e}")
@@ -248,6 +276,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             "message": "Teleoperation started successfully",
             "leader_port": request.leader_port,
             "follower_port": request.follower_port,
+            "bimanual": request.bimanual,
         }
 
     except Exception as e:
@@ -308,8 +337,11 @@ def handle_get_joint_positions() -> dict[str, Any]:
         return {"success": False, "message": "No active teleoperation session"}
 
     try:
-        joint_positions = get_joint_positions_from_robot(current_robot)
-        return {"success": True, "joint_positions": joint_positions, "timestamp": time.time()}
+        if not arms_of(current_robot)[0][0]:
+            joint_positions = get_joint_positions_from_robot(current_robot)
+            return {"success": True, "joint_positions": joint_positions, "timestamp": time.time()}
+        arms = get_arm_joint_positions(current_robot)
+        return {"success": True, "joint_positions": arms["left"], "arms": arms, "timestamp": time.time()}
     except Exception as e:
         logger.error(f"Error getting joint positions: {e}")
         return {"success": False, "message": f"Failed to get joint positions: {str(e)}"}

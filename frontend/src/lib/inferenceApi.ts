@@ -4,6 +4,9 @@ import { CameraRequest } from "./cameraConfig";
 export interface StartInferenceRequest {
   follower_port: string;
   follower_config: string;
+  bimanual?: boolean;
+  right_follower_port?: string;
+  right_follower_config?: string;
   policy_ref: string;
   task: string;
   cameras: Record<string, CameraRequest>;

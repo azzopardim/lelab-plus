@@ -23,6 +23,7 @@ import {
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
 import { startInference } from "@/lib/inferenceApi";
+import { followerArmsPayload } from "@/lib/robotArms";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useCameraBindings } from "@/hooks/useCameraBindings";
 import { cameraConfigurationError } from "@/lib/cameraConfig";
@@ -159,8 +160,7 @@ const InferenceModal: React.FC<Props> = ({
     await new Promise((r) => setTimeout(r, 300));
     try {
       await startInference(baseUrl, fetchWithHeaders, {
-        follower_port: robot.follower_port,
-        follower_config: robot.follower_config,
+        ...followerArmsPayload(robot),
         policy_ref: selectedRef,
         task,
         cameras: cameraBindings.toCameraDict(DEFAULT_FPS),

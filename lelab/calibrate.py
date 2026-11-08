@@ -98,6 +98,10 @@ class CalibrationRequest:
     port: str
     config_file: str
     robot_name: str | None = None  # When set, write port + config back into the robot record on success
+    # Which arm of a bimanual robot record this calibrates: "left" writes the
+    # unprefixed fields (also the only arm of a single-arm robot), "right" the
+    # `right_*` ones. Calibration itself is always one SO-101 arm at a time.
+    arm: Literal["left", "right"] = "left"
 
 
 class CalibrationManager:
@@ -498,10 +502,12 @@ class CalibrationManager:
         if request is not None and request.robot_name:
             from .utils.config import save_robot_record
 
-            if request.device_type == "teleop":
-                patch = {"leader_port": request.port, "leader_config": f"{request.config_file}.json"}
-            else:
-                patch = {"follower_port": request.port, "follower_config": f"{request.config_file}.json"}
+            side = "leader" if request.device_type == "teleop" else "follower"
+            prefix = "right_" if request.arm == "right" else ""
+            patch = {
+                f"{prefix}{side}_port": request.port,
+                f"{prefix}{side}_config": f"{request.config_file}.json",
+            }
             try:
                 save_robot_record(request.robot_name, patch, allow_create=False)
             except Exception as e:

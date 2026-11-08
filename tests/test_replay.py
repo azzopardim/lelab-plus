@@ -16,6 +16,8 @@ modes, and the start/stop paths that never move the arm."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -90,7 +92,9 @@ def test_start_replay_reports_connection_failure(monkeypatch: pytest.MonkeyPatch
     import lelab.replay as replay
 
     monkeypatch.setattr(replay, "_episode_actions", lambda repo_id, episode: ([{"gripper.pos": 0.0}], 30))
-    monkeypatch.setattr(replay, "setup_follower_calibration_file", lambda config: "follower")
+    monkeypatch.setattr(
+        replay, "build_follower_config", lambda request: SimpleNamespace(port=request.follower_port)
+    )
 
     class _Bus:
         def connect(self) -> None:
@@ -99,7 +103,10 @@ def test_start_replay_reports_connection_failure(monkeypatch: pytest.MonkeyPatch
     followers = []
 
     class _Follower:
+        action_features = {"gripper.pos": float}
+
         def __init__(self, config) -> None:
+            self.config = config
             self.bus = _Bus()
             self.disconnected = False
             followers.append(self)
@@ -107,7 +114,7 @@ def test_start_replay_reports_connection_failure(monkeypatch: pytest.MonkeyPatch
         def disconnect(self) -> None:
             self.disconnected = True
 
-    monkeypatch.setattr(replay, "SO101Follower", _Follower)
+    monkeypatch.setattr(replay, "make_robot_from_config", _Follower)
 
     result = replay.handle_start_replay(_replay_request())
 

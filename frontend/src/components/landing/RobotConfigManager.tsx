@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { RobotRecord } from "@/hooks/useRobots";
+import { armsPayload, followerArmsPayload } from "@/lib/robotArms";
 import RobotTile from "./RobotTile";
 
 interface RobotConfigManagerProps {
@@ -37,12 +38,7 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
       const res = await fetchWithHeaders(`${baseUrl}/move-arm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          leader_port: robot.leader_port,
-          follower_port: robot.follower_port,
-          leader_config: robot.leader_config,
-          follower_config: robot.follower_config,
-        }),
+        body: JSON.stringify(armsPayload(robot)),
       });
       const data = await res.json();
       // The backend returns HTTP 200 with `{ success: false }` for logical
@@ -53,7 +49,7 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
           title: "Teleoperation Started",
           description: data.message || `Started teleoperation for ${robot.name}.`,
         });
-        navigate("/teleoperation");
+        navigate("/teleoperation", { state: { bimanual: !!robot.bimanual } });
       } else {
         toast({
           title: "Error Starting Teleoperation",
@@ -62,6 +58,32 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
         });
       }
     } catch (e) {
+      toast({
+        title: "Connection Error",
+        description: "Could not connect to the backend server.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleJog = async (robot: RobotRecord) => {
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/start-jog`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(followerArmsPayload(robot)),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        navigate("/jog", { state: { bimanual: !!robot.bimanual } });
+      } else {
+        toast({
+          title: "Couldn't start 3D jog",
+          description: data.message || (res.status === 422 ? "Check the follower ports." : "Failed to start."),
+          variant: "destructive",
+        });
+      }
+    } catch {
       toast({
         title: "Connection Error",
         description: "Could not connect to the backend server.",
@@ -80,6 +102,7 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
       onCreateNew={createRobot}
       onConfigure={handleConfigure}
       onTeleop={handleTeleop}
+      onJog={handleJog}
       onDelete={deleteRobot}
     />
   );

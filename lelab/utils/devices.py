@@ -33,6 +33,15 @@ def safe_disconnect_device(device: Any, logger: logging.Logger, context: str = "
 
 def _force_close_device_resources(device: Any, logger: logging.Logger) -> None:
     """Best-effort release for serial/camera resources after disconnect fails."""
+    # Bimanual devices (BiSOFollower / BiSOLeader) own one bus per arm and no
+    # top-level bus; their `cameras` dict merges the arms' cameras, so releasing
+    # each arm covers everything.
+    arms = [getattr(device, side, None) for side in ("left_arm", "right_arm")]
+    if all(arm is not None for arm in arms):
+        for arm in arms:
+            _force_close_device_resources(arm, logger)
+        return
+
     bus = getattr(device, "bus", None)
     if bus is not None:
         # SerialMotorsBus.disconnect() closes the port even when disabling the torque fails.

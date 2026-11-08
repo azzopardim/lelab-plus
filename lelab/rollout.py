@@ -40,13 +40,15 @@ from pydantic import BaseModel, field_validator
 from lerobot.utils.device_utils import auto_select_torch_device
 
 from .camera_config import lerobot_camera_settings, validate_camera_rotations
-from .utils.config import setup_follower_calibration_file
+from .utils import config as _config
+from .utils.arms import BimanualFollowerFields
+from .utils.config import setup_bimanual_follower_calibration_files, setup_follower_calibration_file
 from .utils.devices import follower_lock
 
 logger = logging.getLogger(__name__)
 
 
-class InferenceRequest(BaseModel):
+class InferenceRequest(BimanualFollowerFields, BaseModel):
     follower_port: str
     follower_config: str
     policy_ref: str  # opaque ref returned by /jobs/{id}/checkpoints
@@ -189,6 +191,32 @@ def _rollout_inference_args(policy_path: str) -> list[str]:
     return args
 
 
+def _robot_args(request: InferenceRequest) -> list[str]:
+    """The ``--robot.*`` flags for a single SO-101 follower or a bimanual pair.
+
+    `setup_*_calibration_file(s)` return ids without the .json extension:
+    lerobot appends it when building ``calibration_dir / f"{id}.json"`` (and
+    ``{id}_left.json`` / ``{id}_right.json`` for bi_so_follower).
+    """
+    if request.bimanual:
+        device_id = setup_bimanual_follower_calibration_files(
+            request.follower_config, request.right_follower_config
+        )
+        return [
+            "--robot.type=bi_so_follower",
+            f"--robot.id={device_id}",
+            f"--robot.calibration_dir={_config.BIMANUAL_FOLLOWER_CALIBRATION_PATH}",
+            f"--robot.left_arm_config.port={request.follower_port}",
+            f"--robot.right_arm_config.port={request.right_follower_port}",
+        ]
+    follower_id = setup_follower_calibration_file(request.follower_config)
+    return [
+        "--robot.type=so101_follower",
+        f"--robot.port={request.follower_port}",
+        f"--robot.id={follower_id}",
+    ]
+
+
 def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     """Convert native camera settings into
     lerobot's CLI dict syntax. The frontend key `camera_index` is
@@ -298,7 +326,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     global _inference_rollout_started_at, _inference_meta
 
     # Mutex with teleop, recording and replay: they all drive the same serial bus.
-    from . import record as _record, replay as _replay, teleoperate as _teleoperate
+    from . import jog as _jog, record as _record, replay as _replay, teleoperate as _teleoperate
 
     with follower_lock, _state_lock:
         if _teleoperate.teleoperation_active:
@@ -319,6 +347,12 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "Replay is currently active. Stop it first.",
             }
+        if _jog.jog_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "3D jog is currently active. Stop it first.",
+            }
         if inference_active:
             return {
                 "success": False,
@@ -334,11 +368,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     # locked).
     log_handle = None
     try:
-        # `setup_follower_calibration_file` returns the basename without the
-        # .json extension. We need that stripped form for `--robot.id`,
-        # because lerobot appends `.json` itself when constructing
-        # `calibration_dir / f"{id}.json"`.
-        follower_id = setup_follower_calibration_file(request.follower_config)
+        robot_args = _robot_args(request)
         policy_path = _resolve_policy_path(request.policy_ref)
 
         cmd = [
@@ -348,9 +378,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "--strategy.type=base",
             f"--policy.path={policy_path}",
             f"--policy.device={auto_select_torch_device().type}",
-            "--robot.type=so101_follower",
-            f"--robot.port={request.follower_port}",
-            f"--robot.id={follower_id}",
+            *robot_args,
             # JSON-quoted: draccus decodes a string as YAML, so "step 1: grab it" became a dict.
             f"--task={json.dumps(request.task)}",
             f"--duration={request.duration_s}",
@@ -381,7 +409,8 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         )
         try:
             assert proc.stdin is not None
-            proc.stdin.write(b"\n")
+            # One ENTER per arm: a bimanual robot asks once for each side.
+            proc.stdin.write(b"\n\n" if request.bimanual else b"\n")
             proc.stdin.flush()
             proc.stdin.close()
         except Exception as exc:

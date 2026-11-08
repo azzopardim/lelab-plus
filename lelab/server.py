@@ -49,6 +49,14 @@ from .jobs import (
     JobTarget,
     job_registry,
 )
+from .jog import (
+    JogRequest,
+    JogTargetRequest,
+    handle_jog_status,
+    handle_jog_target,
+    handle_start_jog,
+    handle_stop_jog,
+)
 from .record import (
     DatasetInfoRequest,
     RecordingRequest,
@@ -385,6 +393,28 @@ def stop_replay():
 @app.get("/replay-status")
 def replay_status():
     return handle_replay_status()
+
+
+@app.post("/start-jog")
+def start_jog(request: JogRequest):
+    """Drive the follower arm(s) from the 3D view (no leader)."""
+    return handle_start_jog(request, manager)
+
+
+@app.post("/jog-target")
+def jog_target(request: JogTargetRequest):
+    """Hold-to-move joint targets for one arm; must be refreshed while held."""
+    return handle_jog_target(request)
+
+
+@app.post("/stop-jog")
+def stop_jog():
+    return handle_stop_jog()
+
+
+@app.get("/jog-status")
+def jog_status():
+    return handle_jog_status()
 
 
 @app.get("/joint-positions")
@@ -1469,6 +1499,11 @@ async def shutdown_event():
     logger.info("🔄 FastAPI shutting down, cleaning up...")
 
     _record.stop_recording_and_wait()
+    # Release a jogged arm instead of leaving its port open on exit.
+    from . import jog as _jog
+
+    if _jog.jog_active:
+        _jog.handle_stop_jog()
 
     if manager:
         manager.stop_broadcast_thread()

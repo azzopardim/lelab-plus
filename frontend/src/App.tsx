@@ -6,6 +6,7 @@ import { DragAndDropProvider } from "@/contexts/DragAndDropContext";
 import { Toaster } from "@/components/ui/toaster";
 import Landing from "@/pages/Landing";
 import Teleoperation from "@/pages/Teleoperation";
+import Jog from "@/pages/Jog";
 import Calibration from "@/pages/Calibration";
 import Recording from "@/pages/Recording";
 import Training from "@/pages/Training";
@@ -41,6 +42,7 @@ function App() {
                         <Routes>
                           <Route path="/" element={<Landing />} />
                           <Route path="/teleoperation" element={<Teleoperation />} />
+                          <Route path="/jog" element={<Jog />} />
                           <Route path="/recording" element={<Recording />} />
                           <Route path="/upload" element={<Upload />} />
                           <Route path="/training" element={<Training />} />

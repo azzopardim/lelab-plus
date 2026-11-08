@@ -22,6 +22,7 @@ import { useCameraReference } from "@/hooks/useCameraReference";
 import BrowserCameraPreview from "@/components/control/BrowserCameraPreview";
 import CameraRotationSelect from "@/components/control/CameraRotationSelect";
 import CameraReferenceControls from "@/components/recording/CameraReferenceControls";
+import SelectedCameraPreview from "@/components/recording/SelectedCameraPreview";
 import {
   CameraConfig,
   cameraRotation,
@@ -293,6 +294,13 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             </Button>
           </div>
         </div>
+
+        <SelectedCameraPreview
+          camera={
+            availableCameras.find((cam) => cam.index.toString() === selectedCameraIndex) ?? null
+          }
+          paused={streamsPaused}
+        />
       </div>
       )}
 

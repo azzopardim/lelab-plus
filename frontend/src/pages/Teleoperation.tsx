@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
@@ -7,6 +7,8 @@ import { useApi } from "@/contexts/ApiContext";
 
 const TeleoperationPage = () => {
   const navigate = useNavigate();
+  const location = useLocation();
+  const bimanual = !!(location.state as { bimanual?: boolean } | null)?.bimanual;
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
 
@@ -73,6 +75,7 @@ const TeleoperationPage = () => {
         <VisualizerPanel
           onGoBack={handleGoBack}
           className="lg:w-full"
+          bimanual={bimanual}
           rightSlot={<TeleopCameraPanel />}
         />
       </div>

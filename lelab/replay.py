@@ -22,11 +22,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+from lerobot.robots import make_robot_from_config
 from lerobot.utils.robot_utils import precise_sleep
 
 from . import episode_media
-from .utils.config import setup_follower_calibration_file
+from .utils.arms import BimanualFollowerFields, build_follower_config, connect_buses, write_calibration
 from .utils.devices import follower_lock, safe_disconnect_device
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ replay_error: str | None = None
 _stop = threading.Event()
 
 
-class ReplayRequest(BaseModel):
+class ReplayRequest(BimanualFollowerFields, BaseModel):
     follower_port: str
     follower_config: str
     dataset_repo_id: str
@@ -55,12 +55,25 @@ def _episode_actions(repo_id: str, episode_index: int) -> tuple[list[dict[str, f
     return [dict(zip(names, row, strict=True)) for row in rows], info["fps"]
 
 
+def _check_actions_match_robot(actions: list[dict[str, float]], robot) -> None:
+    """Refuse to replay a single-arm episode on a bimanual robot (or the other
+    way round): the action keys would not match and the arms would not move."""
+    if not actions:
+        return
+    expected = set(robot.action_features)
+    recorded = set(actions[0])
+    if not expected <= recorded:
+        kind = "two-arm" if any(k.startswith(("left_", "right_")) for k in recorded) else "single-arm"
+        target = "a two-arm robot" if getattr(robot, "left_arm", None) is not None else "a single-arm robot"
+        raise ValueError(f"This episode was recorded on a {kind} robot and can't be replayed on {target}.")
+
+
 def handle_start_replay(request: ReplayRequest) -> dict[str, Any]:
     """Connect the follower synchronously, so a failure reaches the caller,
     then send the episode's actions at the recording's rate in the background."""
     global replay_active, replay_thread, replay_error
 
-    from . import record as _record, rollout as _rollout, teleoperate as _teleoperate
+    from . import jog as _jog, record as _record, rollout as _rollout, teleoperate as _teleoperate
 
     with follower_lock:
         if replay_active:
@@ -71,6 +84,8 @@ def handle_start_replay(request: ReplayRequest) -> dict[str, Any]:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        if _jog.jog_active:
+            return {"success": False, "message": "3D jog is currently active. Stop it first."}
         replay_active = True
         replay_error = None
         _stop.clear()
@@ -79,18 +94,10 @@ def handle_start_replay(request: ReplayRequest) -> dict[str, Any]:
     try:
         actions, fps = _episode_actions(request.dataset_repo_id, request.episode_index)
 
-        follower_id = setup_follower_calibration_file(request.follower_config)
-        robot = SO101Follower(SO101FollowerConfig(port=request.follower_port, id=follower_id))
-        try:
-            robot.bus.connect()
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not connect to the follower arm on {request.follower_port}. "
-                "Make sure it's plugged in and powered on, then try again."
-            ) from e
-        # Feetech motors only store calibration registers with the torque off.
-        robot.bus.disable_torque()
-        robot.bus.write_calibration(robot.calibration)
+        robot = make_robot_from_config(build_follower_config(request))
+        _check_actions_match_robot(actions, robot)
+        connect_buses(robot, "follower")
+        write_calibration(robot)
         robot.configure()
     except Exception as e:
         safe_disconnect_device(robot, logger)

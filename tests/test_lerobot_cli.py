@@ -130,3 +130,61 @@ def test_rollout_argv_parses(monkeypatch, tmp_path) -> None:
     assert cfg.robot.id == "robot_a"
     assert cfg.task == "step 1: grab the cube"
     assert set(cfg.robot.cameras) == {"front"}
+
+
+def test_bimanual_rollout_argv_parses(monkeypatch, tmp_path) -> None:
+    import lerobot.scripts.lerobot_rollout as lerobot_rollout
+    from lelab import rollout
+    from lelab.rollout import InferenceRequest
+    from lerobot.configs.types import FeatureType, PolicyFeature
+    from lerobot.policies.act.configuration_act import ACTConfig
+
+    checkpoint = tmp_path / "pretrained_model"
+    checkpoint.mkdir()
+    ACTConfig(
+        input_features={"observation.state": PolicyFeature(type=FeatureType.STATE, shape=(12,))},
+        output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(12,))},
+    )._save_pretrained(checkpoint)
+
+    commands: list[list[str]] = []
+
+    def capture(cmd, **kwargs):
+        commands.append(cmd)
+        raise OSError("stop before spawning")
+
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "setup_bimanual_follower_calibration_files", lambda left, right: "lelab")
+    monkeypatch.setattr(rollout._config, "BIMANUAL_FOLLOWER_CALIBRATION_PATH", str(tmp_path / "bi"))
+    monkeypatch.setattr(rollout.subprocess, "Popen", capture)
+    rollout.handle_start_inference(
+        InferenceRequest(
+            bimanual=True,
+            follower_port="/dev/ttyUSB0",
+            follower_config="left",
+            right_follower_port="/dev/ttyUSB1",
+            right_follower_config="right",
+            policy_ref=str(checkpoint),
+            cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}},
+        )
+    )
+
+    parsed = []
+
+    class _StopBeforeHardwareError(Exception):
+        pass
+
+    def stop_before_hardware(cfg, _shutdown_event):
+        parsed.append(cfg)
+        raise _StopBeforeHardwareError
+
+    monkeypatch.setattr(lerobot_rollout, "build_rollout_context", stop_before_hardware)
+    monkeypatch.setattr(sys, "argv", ["lerobot-rollout", *commands[0][3:]])
+    with pytest.raises(_StopBeforeHardwareError):
+        lerobot_rollout.main()
+
+    (cfg,) = parsed
+    assert cfg.robot.type == "bi_so_follower"
+    assert cfg.robot.id == "lelab"
+    assert cfg.robot.left_arm_config.port == "/dev/ttyUSB0"
+    assert cfg.robot.right_arm_config.port == "/dev/ttyUSB1"
+    assert set(cfg.robot.cameras) == {"front"}

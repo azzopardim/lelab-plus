@@ -70,6 +70,10 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "CONFIG_STORAGE_PATH", str(saved_dir))
     monkeypatch.setattr(cfg, "LEADER_CONFIG_FILE", str(saved_dir / "leader_config.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_FILE", str(saved_dir / "follower_config.txt"))
+    monkeypatch.setattr(cfg, "BIMANUAL_LEADER_CALIBRATION_PATH", str(cache / "calibration" / "bi_so_leader"))
+    monkeypatch.setattr(
+        cfg, "BIMANUAL_FOLLOWER_CALIBRATION_PATH", str(cache / "calibration" / "bi_so_follower")
+    )
 
     return cache
 

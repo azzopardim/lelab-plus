@@ -61,6 +61,18 @@ const Footer: React.FC = () => {
           ))}
         </nav>
       </div>
+      <p className="mx-auto max-w-7xl px-4 pb-3 text-center text-xs text-gray-500">
+        Disclaimer: LeLab+ has been developed from a fork of{" "}
+        <a
+          href="https://github.com/huggingface/leLab"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline hover:text-white"
+        >
+          LeLab by Hugging Face
+        </a>
+        . It is not an official Hugging Face product.
+      </p>
     </footer>
   );
 };

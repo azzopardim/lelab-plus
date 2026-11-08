@@ -89,6 +89,18 @@ def test_get_joint_positions_maps_degrees_to_radians_without_correction() -> Non
     assert positions["Jaw"] == pytest.approx(math.radians(50.0))
 
 
+def _patch_configs(monkeypatch: pytest.MonkeyPatch, teleop) -> None:
+    """Skip the calibration-file staging: the fake devices only need a port."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        teleop, "build_follower_config", lambda request: SimpleNamespace(port=request.follower_port)
+    )
+    monkeypatch.setattr(
+        teleop, "build_leader_config", lambda request: SimpleNamespace(port=request.leader_port)
+    )
+
+
 def test_start_teleoperation_reports_connection_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -100,7 +112,7 @@ def test_start_teleoperation_reports_connection_failure(
     import lelab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    _patch_configs(monkeypatch, teleop)
 
     class _Bus:
         def connect(self) -> None:
@@ -108,6 +120,7 @@ def test_start_teleoperation_reports_connection_failure(
 
     class _Device:
         def __init__(self, config) -> None:
+            self.config = config
             self.bus = _Bus()
             self.cameras: dict = {}
             self.disconnected = False
@@ -115,8 +128,8 @@ def test_start_teleoperation_reports_connection_failure(
         def disconnect(self) -> None:
             self.disconnected = True
 
-    monkeypatch.setattr(teleop, "SO101Follower", _Device)
-    monkeypatch.setattr(teleop, "SO101Leader", _Device)
+    monkeypatch.setattr(teleop, "make_robot_from_config", _Device)
+    monkeypatch.setattr(teleop, "make_teleoperator_from_config", _Device)
 
     request = teleop.TeleoperateRequest(
         leader_port="COM_LEADER",
@@ -143,7 +156,7 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     import lelab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    _patch_configs(monkeypatch, teleop)
 
     class _OkBus:
         def connect(self) -> None:
@@ -155,6 +168,7 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
 
     class _Follower:
         def __init__(self, config) -> None:
+            self.config = config
             self.bus = _OkBus()
             self.cameras: dict = {}
             self.disconnected = False
@@ -164,6 +178,7 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
 
     class _Leader:
         def __init__(self, config) -> None:
+            self.config = config
             self.bus = _FailingBus()
             self.disconnected = False
 
@@ -172,9 +187,11 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
 
     created: dict = {}
     monkeypatch.setattr(
-        teleop, "SO101Follower", lambda config: created.setdefault("follower", _Follower(config))
+        teleop, "make_robot_from_config", lambda config: created.setdefault("follower", _Follower(config))
     )
-    monkeypatch.setattr(teleop, "SO101Leader", lambda config: created.setdefault("leader", _Leader(config)))
+    monkeypatch.setattr(
+        teleop, "make_teleoperator_from_config", lambda config: created.setdefault("leader", _Leader(config))
+    )
 
     request = teleop.TeleoperateRequest(
         leader_port="COM_LEADER",

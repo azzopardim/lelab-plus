@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { URDFViewerElement } from "@/lib/urdfViewerHelpers";
+import { JointedRobot, setRobotJoints } from "@/lib/bimanualScene";
 import { useApi } from "@/contexts/ApiContext";
 
 interface JointData {
   type: "joint_update";
   joints: Record<string, number>;
+  /** Present for a bimanual robot; `joints` then mirrors the left arm. */
+  arms?: Partial<Record<"left" | "right", Record<string, number>>>;
   timestamp: number;
 }
 
@@ -12,6 +15,14 @@ interface UseRealTimeJointsProps {
   viewerRef: React.RefObject<URDFViewerElement>;
   enabled?: boolean;
   websocketUrl?: string;
+  /**
+   * Bimanual robot: the viewer's own robot mirrors the left arm and
+   * rightRobotRef (the copy placed beside it) the right arm.
+   */
+  bimanual?: boolean;
+  rightRobotRef?: React.RefObject<JointedRobot | null>;
+  /** Arm currently held in a jog drag; its live updates are skipped. */
+  heldArmRef?: React.RefObject<"left" | "right" | null>;
 }
 
 const INITIAL_RECONNECT_DELAY_MS = 1000;
@@ -21,6 +32,9 @@ export const useRealTimeJoints = ({
   viewerRef,
   enabled = true,
   websocketUrl,
+  bimanual = false,
+  rightRobotRef,
+  heldArmRef,
 }: UseRealTimeJointsProps) => {
   const { wsBaseUrl } = useApi();
   const finalWebSocketUrl = websocketUrl || `${wsBaseUrl}/ws/joint-data`;
@@ -77,7 +91,14 @@ export const useRealTimeJoints = ({
         try {
           const data = JSON.parse(event.data) as JointData;
           if (data.type === "joint_update" && data.joints) {
-            updateJointValues(data.joints);
+            // `joints` is the single arm, or the left arm of a bimanual robot.
+            const held = heldArmRef?.current;
+            if (held !== "left") updateJointValues(data.arms?.left ?? data.joints);
+            const right = bimanual && held !== "right" ? data.arms?.right : undefined;
+            const rightRobot = rightRobotRef?.current;
+            if (right && rightRobot && setRobotJoints(rightRobot, right)) {
+              viewerRef.current?.redraw();
+            }
           }
         } catch (error) {
           console.error("Error parsing WebSocket message:", error);
@@ -124,7 +145,7 @@ export const useRealTimeJoints = ({
       }
       setIsConnected(false);
     };
-  }, [enabled, finalWebSocketUrl, updateJointValues]);
+  }, [enabled, finalWebSocketUrl, updateJointValues, bimanual, rightRobotRef, heldArmRef, viewerRef]);
 
   return { isConnected };
 };

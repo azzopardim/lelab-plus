@@ -9,11 +9,11 @@ const LandingTopBar: React.FC = () => {
         <div className="flex items-center gap-2">
           <img
             src="/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png"
-            alt="LeLab"
+            alt="LeLab+"
             className="h-7 w-7"
           />
           <span className="text-base font-semibold tracking-tight text-white">
-            LeLab
+            LeLab<span className="text-yellow-400">+</span>
           </span>
         </div>
         <div className="flex items-center gap-2">

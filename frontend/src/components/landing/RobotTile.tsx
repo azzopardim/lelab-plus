@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { RobotRecord } from "@/hooks/useRobots";
 import RobotSelector from "./RobotSelector";
+import { followersReady } from "@/lib/robotArms";
 
 interface RobotTileProps {
   robot: RobotRecord | null;
@@ -26,6 +27,8 @@ interface RobotTileProps {
   onCreateNew: (name: string) => Promise<boolean>;
   onConfigure: (name: string) => void;
   onTeleop: (robot: RobotRecord) => void;
+  /** Start 3D jog (drag the arm in the 3D view); hidden when not provided. */
+  onJog?: (robot: RobotRecord) => void;
   onDelete: (name: string) => void;
 }
 
@@ -38,11 +41,15 @@ const RobotTile: React.FC<RobotTileProps> = ({
   onCreateNew,
   onConfigure,
   onTeleop,
+  onJog,
   onDelete,
 }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const status = robot ? (robot.is_clean ? "Ready" : "Needs configuration") : null;
+  const readiness = robot ? (robot.is_clean ? "Ready" : "Needs configuration") : null;
+  const status = robot?.bimanual ? `${readiness} · 2 arms` : readiness;
   const teleopDisabled = !robot || !robot.is_clean;
+  // 3D jog only drives the followers, so it doesn't need the leaders set up.
+  const jogDisabled = !robot || !followersReady(robot);
 
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2 relative">
@@ -120,6 +127,28 @@ const RobotTile: React.FC<RobotTileProps> = ({
           {teleopDisabled && (
             <TooltipContent>Configure the robot first.</TooltipContent>
           )}
+        </Tooltip>
+      )}
+
+      {robot && onJog && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className="w-full">
+              <Button
+                variant="outline"
+                onClick={() => onJog(robot)}
+                disabled={jogDisabled}
+                className="w-full border-gray-600 bg-transparent text-gray-200 hover:bg-gray-700 hover:text-white"
+              >
+                Move in 3D
+              </Button>
+            </div>
+          </TooltipTrigger>
+          <TooltipContent>
+            {jogDisabled
+              ? "Set up the follower arm first."
+              : "Drag the arm in the 3D view to move it — no leader needed."}
+          </TooltipContent>
         </Tooltip>
       )}
 

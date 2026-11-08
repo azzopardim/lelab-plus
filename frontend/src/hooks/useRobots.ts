@@ -4,12 +4,23 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { CameraConfig, cameraConfigurationError, loadCameraConfigs } from "@/lib/cameraConfig";
 
+/**
+ * A named robot. Single-arm robots use the unprefixed fields. A bimanual robot
+ * (`bimanual: true`) is two leader→follower pairs in one environment: the
+ * unprefixed fields are the LEFT pair and the `right_*` fields the right pair.
+ * See lib/robotArms.ts for the helpers that read these.
+ */
 export interface RobotRecord {
   name: string;
   leader_port: string;
   follower_port: string;
   leader_config: string;
   follower_config: string;
+  bimanual?: boolean;
+  right_leader_port?: string;
+  right_follower_port?: string;
+  right_leader_config?: string;
+  right_follower_config?: string;
   cameras: CameraConfig[];
   is_clean: boolean;
 }
